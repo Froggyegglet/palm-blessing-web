@@ -1,18 +1,25 @@
 import http from "node:http";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createReadStream } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const dataRoot = resolve(process.env.PALM_BLESSING_DATA_DIR || join(__dirname, ".data"));
+const dataRoot = resolve(
+  process.env.PALM_BLESSING_DATA_DIR || (process.env.VERCEL ? join(tmpdir(), "palm-blessing-data") : join(__dirname, ".data"))
+);
 const imageRoot = join(dataRoot, "images");
 const readingRoot = join(dataRoot, "readings");
 const port = Number(process.env.PORT || 4173);
 const host = process.env.HOST || "0.0.0.0";
 const openAiModel = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 const maxBodyBytes = Number(process.env.MAX_BODY_BYTES || 8 * 1024 * 1024);
+const supabaseUrl = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
+const supabaseKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || "").trim();
+const supabaseBucket = process.env.SUPABASE_STORAGE_BUCKET || "palm-scans";
+const supabaseTable = process.env.SUPABASE_TABLE || "palm_readings";
 
 mkdirSync(imageRoot, { recursive: true });
 mkdirSync(readingRoot, { recursive: true });
@@ -34,6 +41,75 @@ function readApiKey() {
   const file = process.env.OPENAI_API_KEY_FILE;
   if (!file || !existsSync(file)) return "";
   return readFileSync(file, "utf8").trim();
+}
+
+function hasSupabase() {
+  return Boolean(supabaseUrl && supabaseKey);
+}
+
+async function supabaseRequest(path, options = {}) {
+  if (!hasSupabase()) throw new Error("Supabase is not configured");
+  const headers = {
+    apikey: supabaseKey,
+    Authorization: `Bearer ${supabaseKey}`,
+    ...(options.headers || {}),
+  };
+  const result = await fetch(`${supabaseUrl}${path}`, { ...options, headers });
+  const text = await result.text();
+  let payload = null;
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = text;
+    }
+  }
+  if (!result.ok) {
+    const message = payload?.message || payload?.error || text || `Supabase request failed: ${result.status}`;
+    throw new Error(message);
+  }
+  return payload;
+}
+
+function readingToRow(reading) {
+  return {
+    id: reading.id,
+    device_id: reading.deviceId || "",
+    shop_id: reading.shopId || "",
+    language: reading.language || "en",
+    payment_status: reading.paymentStatus || "pending",
+    analysis_status: reading.analysisStatus || "pending",
+    palm_image_path: reading.palmImagePath || "",
+    analysis: reading.analysis || null,
+    payment_id: reading.paymentId || "",
+    print_status: reading.printStatus || "",
+    created_at: reading.createdAt || new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    expires_at: reading.expiresAt,
+  };
+}
+
+function rowToReading(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    deviceId: row.device_id || "",
+    shopId: row.shop_id || "",
+    language: row.language || "en",
+    paymentStatus: row.payment_status || "pending",
+    analysisStatus: row.analysis_status || "pending",
+    palmImagePath: row.palm_image_path || "",
+    analysis: row.analysis || null,
+    paymentId: row.payment_id || "",
+    printStatus: row.print_status || "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    expiresAt: row.expires_at,
+  };
+}
+
+function encodePostgrestValue(value) {
+  return encodeURIComponent(String(value).replace(/,/g, "\\,"));
 }
 
 function jsonResponse(response, status, payload) {
@@ -80,14 +156,34 @@ function normalizeReadingId(id) {
   return clean;
 }
 
-function loadReading(id) {
+async function loadReading(id) {
   const file = readingPath(id);
-  if (!file || !existsSync(file)) return null;
+  if (!file) return null;
+  if (hasSupabase()) {
+    const rows = await supabaseRequest(
+      `/rest/v1/${supabaseTable}?id=eq.${encodePostgrestValue(normalizeReadingId(id))}&select=*`,
+      { method: "GET" }
+    );
+    return rowToReading(Array.isArray(rows) ? rows[0] : null);
+  }
+  if (!existsSync(file)) return null;
   return JSON.parse(readFileSync(file, "utf8"));
 }
 
-function saveReading(reading) {
+async function saveReading(reading) {
+  if (hasSupabase()) {
+    const [row] = await supabaseRequest(`/rest/v1/${supabaseTable}?on_conflict=id&select=*`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates,return=representation",
+      },
+      body: JSON.stringify(readingToRow(reading)),
+    });
+    return rowToReading(row) || reading;
+  }
   writeFileSync(readingPath(reading.id), JSON.stringify(reading, null, 2), "utf8");
+  return reading;
 }
 
 function publicReading(reading, request) {
@@ -100,7 +196,7 @@ function publicReading(reading, request) {
     paymentStatus: reading.paymentStatus,
     analysisStatus: reading.analysisStatus,
     language: reading.language || "en",
-    palmImageUrl: reading.palmImageFile ? `${base}/api/readings/${reading.id}/image` : "",
+    palmImageUrl: reading.palmImagePath || reading.palmImageFile ? `${base}/api/readings/${reading.id}/image` : "",
     detailUrl,
     printText: buildReceiptText(reading, detailUrl),
     analysis: reading.analysis || null,
@@ -397,21 +493,58 @@ function clampPercent(value) {
   return Math.max(0, Math.min(100, Math.round(number)));
 }
 
-function saveImageFromDataUrl(readingId, imageDataUrl) {
+function parseImageDataUrl(imageDataUrl) {
   const match = imageDataUrl.match(/^data:(image\/(?:jpeg|jpg|png|webp|svg\+xml));base64,(.+)$/);
   if (!match) {
     if (imageDataUrl.startsWith("data:image/svg+xml")) {
       const svg = decodeURIComponent(imageDataUrl.split(",", 2)[1] || "");
-      const file = join(imageRoot, `${readingId}.svg`);
-      writeFileSync(file, svg, "utf8");
-      return file;
+      return { buffer: Buffer.from(svg, "utf8"), contentType: "image/svg+xml", ext: "svg" };
     }
     throw new Error("Invalid image data URL");
   }
-  const ext = match[1].includes("png") ? "png" : match[1].includes("webp") ? "webp" : "jpg";
-  const file = join(imageRoot, `${readingId}.${ext}`);
-  writeFileSync(file, Buffer.from(match[2], "base64"));
-  return file;
+  const contentType = match[1] === "image/jpg" ? "image/jpeg" : match[1];
+  const ext = contentType.includes("png") ? "png" : contentType.includes("webp") ? "webp" : "jpg";
+  return { buffer: Buffer.from(match[2], "base64"), contentType, ext };
+}
+
+async function saveImageFromDataUrl(readingId, imageDataUrl) {
+  const image = parseImageDataUrl(imageDataUrl);
+  if (hasSupabase()) {
+    const path = `${readingId}.${image.ext}`;
+    await supabaseRequest(`/storage/v1/object/${supabaseBucket}/${encodeURIComponent(path)}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": image.contentType,
+        "Cache-Control": "3600",
+        "x-upsert": "true",
+      },
+      body: image.buffer,
+    });
+    return { path, file: "" };
+  }
+  const file = join(imageRoot, `${readingId}.${image.ext}`);
+  writeFileSync(file, image.buffer);
+  return { path: "", file };
+}
+
+async function loadPalmImage(reading) {
+  if (hasSupabase() && reading.palmImagePath) {
+    const result = await fetch(`${supabaseUrl}/storage/v1/object/${supabaseBucket}/${encodeURIComponent(reading.palmImagePath)}`, {
+      headers: {
+        apikey: supabaseKey,
+        Authorization: `Bearer ${supabaseKey}`,
+      },
+    });
+    if (!result.ok) return null;
+    const contentType = result.headers.get("content-type") || "image/jpeg";
+    const buffer = Buffer.from(await result.arrayBuffer());
+    return { contentType, buffer };
+  }
+  if (!reading.palmImageFile || !existsSync(reading.palmImageFile)) return null;
+  return {
+    contentType: contentTypes[extname(reading.palmImageFile)] || "image/jpeg",
+    stream: createReadStream(reading.palmImageFile),
+  };
 }
 
 function buildReceiptText(reading, detailUrl = `/?reading=${reading.id}`) {
@@ -474,7 +607,8 @@ async function handleApi(request, response) {
       ok: true,
       openaiConfigured: Boolean(readApiKey()),
       model: openAiModel,
-      dataRoot,
+      storage: hasSupabase() ? "supabase" : "local",
+      supabaseConfigured: hasSupabase(),
     });
     return;
   }
@@ -492,7 +626,7 @@ async function handleApi(request, response) {
       createdAt: new Date(now).toISOString(),
       expiresAt: new Date(now + 1000 * 60 * 60 * 24 * 7).toISOString(),
     };
-    saveReading(reading);
+    await saveReading(reading);
     jsonResponse(response, 200, { reading: publicReading(reading, request) });
     return;
   }
@@ -505,7 +639,7 @@ async function handleApi(request, response) {
 
   const id = decodeURIComponent(match[1]);
   const action = match[2] || "";
-  const reading = loadReading(id);
+  const reading = await loadReading(id);
   if (!reading) {
     jsonResponse(response, 404, { error: "Reading not found" });
     return;
@@ -517,15 +651,17 @@ async function handleApi(request, response) {
   }
 
   if (request.method === "GET" && action === "image") {
-    if (!reading.palmImageFile || !existsSync(reading.palmImageFile)) {
+    const image = await loadPalmImage(reading);
+    if (!image) {
       jsonResponse(response, 404, { error: "Palm image not found" });
       return;
     }
     response.writeHead(200, {
-      "Content-Type": contentTypes[extname(reading.palmImageFile)] || "image/jpeg",
+      "Content-Type": image.contentType,
       "Cache-Control": "private, max-age=3600",
     });
-    createReadStream(reading.palmImageFile).pipe(response);
+    if (image.stream) image.stream.pipe(response);
+    else response.end(image.buffer);
     return;
   }
 
@@ -548,7 +684,7 @@ async function handleApi(request, response) {
     reading.paymentStatus = "paid";
     reading.paymentId = body.paymentId || `mock-${Date.now()}`;
     reading.paidAt = new Date().toISOString();
-    saveReading(reading);
+    await saveReading(reading);
     jsonResponse(response, 200, { reading: publicReading(reading, request) });
     return;
   }
@@ -561,14 +697,16 @@ async function handleApi(request, response) {
     }
     reading.language = body.language || reading.language || "en";
     reading.analysisStatus = "processing";
-    reading.palmImageFile = saveImageFromDataUrl(reading.id, body.imageData);
-    saveReading(reading);
+    const image = await saveImageFromDataUrl(reading.id, body.imageData);
+    reading.palmImagePath = image.path;
+    reading.palmImageFile = image.file;
+    await saveReading(reading);
 
     const analysis = await analyzeWithOpenAI(body.imageData, reading.language);
     reading.analysis = analysis;
     reading.analysisStatus = analysis.aiSource?.startsWith("fallback") ? "fallback" : "complete";
     reading.analyzedAt = new Date().toISOString();
-    saveReading(reading);
+    await saveReading(reading);
     jsonResponse(response, 200, { reading: publicReading(reading, request) });
     return;
   }
@@ -586,15 +724,30 @@ async function handleApi(request, response) {
   jsonResponse(response, 404, { error: "Unknown reading action" });
 }
 
-const server = http.createServer(async (request, response) => {
+function normalizeVercelRequest(request) {
+  const queryPath = request.query?.path;
+  if (!queryPath) return;
+  const path = Array.isArray(queryPath) ? queryPath.join("/") : String(queryPath);
+  const current = new URL(request.url || "/", "http://vercel.local");
+  if (!current.pathname.startsWith("/api/[...]")) return;
+  current.pathname = `/api/${path}`;
+  current.searchParams.delete("path");
+  request.url = `${current.pathname}${current.search}`;
+}
+
+export default async function handler(request, response) {
+  normalizeVercelRequest(request);
   try {
     if ((request.url || "").startsWith("/api/")) await handleApi(request, response);
     else serveStatic(request, response);
   } catch (error) {
     jsonResponse(response, 500, { error: String(error.message || error) });
   }
-});
+}
 
-server.listen(port, host, () => {
-  console.log(`Palm Blessing system running at http://${host}:${port}/`);
-});
+if (!process.env.VERCEL) {
+  const server = http.createServer(handler);
+  server.listen(port, host, () => {
+    console.log(`Palm Blessing system running at http://${host}:${port}/`);
+  });
+}

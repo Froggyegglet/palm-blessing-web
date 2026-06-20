@@ -10,9 +10,9 @@ The Android kiosk screen opens this website, captures a palm image, sends it to 
 - Mobile detail page: `/?reading=SYD-xxxxxx`
 - Bilingual UI: English and Chinese
 - OpenAI backend call with the API key kept server-side
-- Per-reading JSON storage and palm image storage
+- Supabase-backed reading storage and private palm image storage for production
 - Real QR endpoint: `/api/readings/:id/qr.svg`
-- Render-ready config with persistent disk
+- Vercel-ready config with serverless API functions
 
 ## Local Setup
 
@@ -32,6 +32,17 @@ HOST=0.0.0.0
 PALM_BLESSING_DATA_DIR=.data
 ```
 
+For a local production-like run, also set:
+
+```bash
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-server-side-supabase-key
+SUPABASE_STORAGE_BUCKET=palm-scans
+SUPABASE_TABLE=palm_readings
+```
+
+If Supabase is not configured locally, the app falls back to `.data` file storage.
+
 Open:
 
 ```text
@@ -46,33 +57,21 @@ http://YOUR-LAN-IP:4173
 
 For production, use a real domain with HTTPS.
 
-## Deploy To Render
+## Deploy To Vercel
 
 1. Create a new GitHub repo with this folder.
 2. Push the code.
-3. In Render, create a new Blueprint or Web Service.
-4. Use `render.yaml`, or set manually:
-
-```text
-Build command: npm install
-Start command: npm start
-```
-
-5. Add environment variables:
+3. In Vercel, import the GitHub repo.
+4. Add environment variables:
 
 ```text
 OPENAI_API_KEY=your key
 OPENAI_MODEL=gpt-4.1-mini
-HOST=0.0.0.0
-PALM_BLESSING_DATA_DIR=/var/data/palm-blessing
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your server-side key
+SUPABASE_STORAGE_BUCKET=palm-scans
+SUPABASE_TABLE=palm_readings
 MAX_BODY_BYTES=8388608
-```
-
-6. Add a persistent disk:
-
-```text
-Mount path: /var/data
-Size: 1 GB
 ```
 
 After deployment:
@@ -85,6 +84,7 @@ Reading URL: https://your-domain.com/?reading=SYD-0620-XXXXXX
 ## Production Notes
 
 - Do not put `OPENAI_API_KEY` in frontend code.
+- Do not put `SUPABASE_SERVICE_ROLE_KEY` in frontend code.
 - Use HTTPS for camera access on phones and Android Chrome.
 - For a real kiosk, Android should run Chrome kiosk mode or a WebView shell pointed at the production URL.
 - Thermal printing should be handled by the Android native shell through printer SDK or JS bridge.
@@ -109,9 +109,7 @@ POST /api/readings/:id/print
 
 ## What To Upgrade After MVP
 
-- Move readings/images to Supabase or S3 instead of local disk.
 - Add admin dashboard for shop/device analytics.
 - Connect real payment callback.
 - Connect Android printer SDK.
 - Generate a dedicated share card image for Instagram/TikTok.
-
