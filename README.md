@@ -114,3 +114,4 @@ POST /api/readings/:id/print
 - Connect real payment callback.
 - Connect Android printer SDK.
 - Generate a dedicated share card image for Instagram/TikTok.
+

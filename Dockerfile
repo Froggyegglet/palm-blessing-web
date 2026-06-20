@@ -14,3 +14,4 @@ ENV PALM_BLESSING_DATA_DIR=/data/palm-blessing
 EXPOSE 4173
 
 CMD ["npm", "start"]
+

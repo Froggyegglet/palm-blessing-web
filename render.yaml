@@ -20,3 +20,4 @@ services:
       name: palm-blessing-data
       mountPath: /var/data
       sizeGB: 1
+
