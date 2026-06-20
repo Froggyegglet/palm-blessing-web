@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Palm Blessing</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main id="app" class="app-shell" aria-live="polite"></main>
+
+    <template id="receipt-template">
+      <section class="receipt-paper" aria-label="Palm blessing receipt">
+        <div class="receipt-title">PALM BLESSING</div>
+        <div class="receipt-subtitle">SYDNEY</div>
+        <div class="receipt-rule"></div>
+        <div class="receipt-label">TODAY'S TYPE</div>
+        <div class="receipt-type" data-receipt-type>SLOW BURN WINNER</div>
+        <div class="receipt-rule"></div>
+        <div class="receipt-row"><span>LOVE</span><span data-love-stars>****-</span><b data-love-score>82</b></div>
+        <div class="receipt-row"><span>CAREER</span><span data-career-stars>*****</span><b data-career-score>91</b></div>
+        <div class="receipt-row"><span>LIFE</span><span data-life-stars>****-</span><b data-life-score>88</b></div>
+        <div class="receipt-rule"></div>
+        <p data-receipt-line>Less explaining. More moving.</p>
+        <div class="receipt-qr" data-qr aria-label="QR code"></div>
+        <div class="receipt-caption">SCAN FOR FULL READING</div>
+        <div class="receipt-tag">#PalmBlessingSydney</div>
+        <div class="receipt-rule"></div>
+        <small>FOR FUN &amp; INSPIRATION</small>
+        <small>NO PALM IMAGE STORED AFTER READING</small>
+      </section>
+    </template>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
